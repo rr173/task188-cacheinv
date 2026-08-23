@@ -126,8 +126,15 @@ func (s *Service) ObserveVersion(replicaID, key string, version int64) (*model.R
 }
 
 // InvalidateKey 处理失效消息：副本版本进入待失效/过期状态。
-// 若失效目标版本低于副本当前版本，说明乱序失效先到，拒绝回滚（保持较新版本）。
+// 单调性与乱序保护：
+//   - targetVersion < 当前观察版本：乱序失效先到，目标更旧 → 拒绝回滚（保留较新版本）；
+//   - targetVersion == 当前观察版本：副本已观察到该版本，失效本版本不构成回退，
+//     保留版本号并进入待确认失效（pending_invalidation）；已 pending/stale 时幂等返回；
+//   - targetVersion > 当前观察版本：推进到目标版本并置为 stale（尚未有效观察即被失效）。
 func (s *Service) InvalidateKey(replicaID, key string, targetVersion int64) (*model.ReplicaKeyVersion, error) {
+	if targetVersion <= 0 {
+		return nil, fmt.Errorf("%w: version must be positive", model.ErrInvalidInput)
+	}
 	cur, err := s.repo.GetReplicaKeyVersion(replicaID, key)
 	now := s.now().UTC()
 	if err == model.ErrNotFound {
@@ -146,20 +153,35 @@ func (s *Service) InvalidateKey(replicaID, key string, targetVersion int64) (*mo
 	if err != nil {
 		return nil, err
 	}
-	if targetVersion <= cur.Version {
+	if targetVersion < cur.Version {
 		// 乱序失效：目标版本比当前观察版本旧，不允许回滚新版本。
 		return nil, fmt.Errorf("%w: stale invalidation replica=%s key=%s target=%d observed=%d",
 			model.ErrVersionRegression, replicaID, key, targetVersion, cur.Version)
 	}
-	status := model.KeyStale
-	if cur.Status == model.KeyValid && cur.Version == targetVersion {
-		status = model.KeyPendingInvalidation
+	if targetVersion == cur.Version {
+		// 失效副本已观察到的同一版本：保持版本单调性，进入待确认失效。
+		// 已处于 pending_invalidation 或 stale 时幂等返回，不回退状态。
+		if cur.Status == model.KeyPendingInvalidation || cur.Status == model.KeyStale {
+			return cur, nil
+		}
+		rkv := &model.ReplicaKeyVersion{
+			ReplicaID: replicaID,
+			Key:       key,
+			Version:   cur.Version,
+			Status:    model.KeyPendingInvalidation,
+			UpdatedAt: now,
+		}
+		if err := s.repo.UpsertReplicaKeyVersion(rkv); err != nil {
+			return nil, err
+		}
+		return rkv, nil
 	}
+	// targetVersion > cur.Version：推进版本并置为 stale（尚未有效观察即被失效）。
 	rkv := &model.ReplicaKeyVersion{
 		ReplicaID: replicaID,
 		Key:       key,
 		Version:   targetVersion,
-		Status:    status,
+		Status:    model.KeyStale,
 		UpdatedAt: now,
 	}
 	if err := s.repo.UpsertReplicaKeyVersion(rkv); err != nil {

@@ -45,18 +45,36 @@ func CheckMonotonicObservations(msgs []model.Message) []string {
 			byReplicaKey[key] = st
 		}
 		switch m.Kind {
-		case model.MsgUpdate, model.MsgInvalidate:
-			if m.Version <= st.version {
+		case model.MsgUpdate:
+			if m.Version < st.version {
 				problems = append(problems, fmt.Sprintf(
 					"msg %s (%s key=%s): version %d would regress observed %d",
 					m.MsgID, m.Kind, m.Key, m.Version, st.version))
 				continue
 			}
-			st.version = m.Version
-			if m.Kind == model.MsgUpdate {
-				st.status = model.KeyValid
-			} else {
+			// 推进版本号；仅当严格更新到更高版本时才置为 valid，
+			// 相等版本不回退也不推进（幂等观察）。
+			if m.Version > st.version {
+				st.version = m.Version
+			}
+			st.status = model.KeyValid
+		case model.MsgInvalidate:
+			// 失效副本已观察到的同版本不构成回退：保留版本单调性，
+			// 仅将其推入待确认失效状态，不应报告回归。
+			if m.Version < st.version {
+				problems = append(problems, fmt.Sprintf(
+					"msg %s (%s key=%s): version %d would regress observed %d",
+					m.MsgID, m.Kind, m.Key, m.Version, st.version))
+				continue
+			}
+			// 与 versioning.InvalidateKey 保持一致：
+			//   - 目标高于已观察版本：乱序失效先到，推进版本并置 stale；
+			//   - 目标等于已观察版本：保持版本号，进入 pending_invalidation。
+			if m.Version > st.version {
+				st.version = m.Version
 				st.status = model.KeyStale
+			} else {
+				st.status = model.KeyPendingInvalidation
 			}
 		case model.MsgAck:
 			// ACK 不推进版本。

@@ -206,8 +206,9 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 			msg := fmt.Sprintf("invalidate for unknown replica %s", m.ReplicaID)
 			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
 		}
-		_, err := e.ver.ObserveVersion(m.ReplicaID, m.Key, m.Version)
-		if err != nil {
+		// 失效消息走 InvalidateKey：保留版本单调性，副本已观察到的同版本
+		// 进入待确认失效（pending_invalidation），而非当成回退拒绝。
+		if _, err := e.ver.InvalidateKey(m.ReplicaID, m.Key, m.Version); err != nil {
 			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
 			msg := fmt.Sprintf("stale invalidation rejected: %v", err)
 			return "rejected:stale_invalidation", violation("stale_invalidation", msg), nil
