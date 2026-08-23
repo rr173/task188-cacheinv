@@ -42,3 +42,18 @@ func StableMessageListHash(msgs []model.Message) string {
 func SortByLogicalClock(msgs []model.Message) {
 	sort.Slice(msgs, func(i, j int) bool { return msgs[i].ID < msgs[j].ID })
 }
+
+// ProtocolParamsHash 计算协议参数指纹（规格漂移判据）。
+// 冻结规格时保存此哈希，Recheck 时与当前协议参数比对：
+// 不一致即协议已变化，旧规格不再代表当前协议 → 视为规格漂移。
+func ProtocolParamsHash(p *model.ProtocolParams) string {
+	parts := []string{
+		p.KeyspaceID,
+		fmt.Sprintf("%d", p.MaxRetries),
+		fmt.Sprintf("%d", p.LeaseTTLMs),
+		fmt.Sprintf("%d", p.ConvergenceTimeoutMs),
+		p.Ordering,
+	}
+	h := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(h[:])
+}

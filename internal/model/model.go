@@ -187,12 +187,13 @@ const (
 
 // Spec 是冻结的回归规格。
 type Spec struct {
-	ID          int64      `json:"id"`
-	ScenarioID  int64      `json:"scenario_id"`
-	Name        string     `json:"name"`
-	MessageHash string     `json:"message_hash"`
-	Status      SpecStatus `json:"status"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID           int64      `json:"id"`
+	ScenarioID   int64      `json:"scenario_id"`
+	Name         string     `json:"name"`
+	MessageHash  string     `json:"message_hash"`
+	ProtocolHash string     `json:"protocol_hash"` // 冻结时的协议参数指纹；Recheck 比对当前协议以发现规格漂移
+	Status       SpecStatus `json:"status"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 // SpecMessage 是规格保存的完整消息序列条目。

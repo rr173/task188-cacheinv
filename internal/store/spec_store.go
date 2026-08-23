@@ -12,7 +12,7 @@ type SpecStore struct{ db *sql.DB }
 
 func NewSpecStore(db *sql.DB) *SpecStore { return &SpecStore{db: db} }
 
-// CreateSpec 创建规格（draft 状态）并保存完整消息序列。
+// CreateSpec 创建规格（draft 状态）并保存完整消息序列与协议指纹。
 func (s *SpecStore) CreateSpec(spec *model.Spec, msgs []model.SpecMessage) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -20,9 +20,9 @@ func (s *SpecStore) CreateSpec(spec *model.Spec, msgs []model.SpecMessage) (int6
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(
-		`INSERT INTO specs (scenario_id, name, message_hash, status, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		spec.ScenarioID, spec.Name, spec.MessageHash, string(spec.Status), spec.CreatedAt.Format(time.RFC3339Nano),
+		`INSERT INTO specs (scenario_id, name, message_hash, protocol_hash, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		spec.ScenarioID, spec.Name, spec.MessageHash, spec.ProtocolHash, string(spec.Status), spec.CreatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return 0, err
@@ -49,10 +49,10 @@ func (s *SpecStore) CreateSpec(spec *model.Spec, msgs []model.SpecMessage) (int6
 // GetSpec 按 ID 查询规格。
 func (s *SpecStore) GetSpec(id int64) (*model.Spec, error) {
 	row := s.db.QueryRow(
-		`SELECT id, scenario_id, name, message_hash, status, created_at FROM specs WHERE id = ?`, id)
+		`SELECT id, scenario_id, name, message_hash, protocol_hash, status, created_at FROM specs WHERE id = ?`, id)
 	var spec model.Spec
 	var ts string
-	if err := row.Scan(&spec.ID, &spec.ScenarioID, &spec.Name, &spec.MessageHash, &spec.Status, &ts); err != nil {
+	if err := row.Scan(&spec.ID, &spec.ScenarioID, &spec.Name, &spec.MessageHash, &spec.ProtocolHash, &spec.Status, &ts); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, model.ErrNotFound
 		}
@@ -64,7 +64,7 @@ func (s *SpecStore) GetSpec(id int64) (*model.Spec, error) {
 
 // ListSpecs 返回全部规格。
 func (s *SpecStore) ListSpecs() ([]model.Spec, error) {
-	rows, err := s.db.Query(`SELECT id, scenario_id, name, message_hash, status, created_at FROM specs ORDER BY id DESC`)
+	rows, err := s.db.Query(`SELECT id, scenario_id, name, message_hash, protocol_hash, status, created_at FROM specs ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,7 @@ func (s *SpecStore) ListSpecs() ([]model.Spec, error) {
 	for rows.Next() {
 		var spec model.Spec
 		var ts string
-		if err := rows.Scan(&spec.ID, &spec.ScenarioID, &spec.Name, &spec.MessageHash, &spec.Status, &ts); err != nil {
+		if err := rows.Scan(&spec.ID, &spec.ScenarioID, &spec.Name, &spec.MessageHash, &spec.ProtocolHash, &spec.Status, &ts); err != nil {
 			return nil, err
 		}
 		spec.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)

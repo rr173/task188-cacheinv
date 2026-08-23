@@ -24,6 +24,7 @@ type Repo interface {
 	ListSpecMessages(specID int64) ([]model.SpecMessage, error)
 	ListMessages(scenarioID int64) ([]model.Message, error)
 	GetScenario(id int64) (*model.Scenario, error)
+	GetProtocol(keyspaceID string) (*model.ProtocolParams, error)
 }
 
 // New 构造规格服务。
@@ -34,7 +35,7 @@ func New(repo Repo, now func() time.Time) *Service {
 	return &Service{repo: repo, now: now}
 }
 
-// FreezeFromScenario 把已收敛场景冻结为规格：保存消息序列哈希与完整序列。
+// FreezeFromScenario 把已收敛场景冻结为规格：保存消息序列哈希、协议参数指纹与完整序列。
 func (s *Service) FreezeFromScenario(scenarioID int64, name string) (*model.Spec, error) {
 	sc, err := s.repo.GetScenario(scenarioID)
 	if err != nil {
@@ -50,13 +51,20 @@ func (s *Service) FreezeFromScenario(scenarioID int64, name string) (*model.Spec
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("%w: scenario %d has no messages", model.ErrInvalidInput, scenarioID)
 	}
+	// 冻结时对当前协议参数取指纹，作为规格漂移判据：
+	// 后续协议参数变化会使指纹不再匹配，从而被 Recheck 发现。
+	proto, err := s.repo.GetProtocol(sc.KeyspaceID)
+	if err != nil {
+		return nil, err
+	}
 	hash := versioning.StableMessageListHash(msgs)
 	spec := &model.Spec{
-		ScenarioID:  scenarioID,
-		Name:        name,
-		MessageHash: hash,
-		Status:      model.SpecDraft,
-		CreatedAt:   s.now().UTC(),
+		ScenarioID:   scenarioID,
+		Name:         name,
+		MessageHash:  hash,
+		ProtocolHash: versioning.ProtocolParamsHash(proto),
+		Status:       model.SpecDraft,
+		CreatedAt:    s.now().UTC(),
 	}
 	specMsgs := make([]model.SpecMessage, 0, len(msgs))
 	for i, m := range msgs {
@@ -81,8 +89,11 @@ func (s *Service) FreezeFromScenario(scenarioID int64, name string) (*model.Spec
 	return spec, nil
 }
 
-// Recheck 按规格保存的消息序列重建场景并重放，验证回归一致。
-// 返回 "passed"（重放收敛）或 "failed"（重放违反/未收敛）。
+// Recheck 按规格保存的指纹校验规格是否仍代表当前协议，并重放验证回归一致。
+// 任一指纹与冻结时不一致即视为规格漂移，返回 "failed"：
+//   - 协议参数变化（协议已演进，旧规格不再描述当前协议）；
+//   - 场景消息序列变化（消息被增删改，与冻结时不同）。
+// 全部一致且回放收敛才返回 "passed"。
 func (s *Service) Recheck(specID int64) (string, error) {
 	spec, err := s.repo.GetSpec(specID)
 	if err != nil {
@@ -95,9 +106,25 @@ func (s *Service) Recheck(specID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// 校验规格保存的哈希与当前消息序列一致（若场景消息被改动则失败）。
-	_, err = s.repo.ListMessages(spec.ScenarioID)
+	sc, err := s.repo.GetScenario(spec.ScenarioID)
 	if err != nil {
+		// 场景丢失：规格已无法重现，视为漂移。
+		return "failed", nil
+	}
+	// 协议漂移判据：当前协议参数与冻结时不一致 → 规格不再代表当前协议。
+	proto, err := s.repo.GetProtocol(sc.KeyspaceID)
+	if err != nil {
+		return "failed", nil
+	}
+	if spec.ProtocolHash != versioning.ProtocolParamsHash(proto) {
+		return "failed", nil
+	}
+	// 消息序列漂移判据：规格保存的哈希与当前场景消息序列不一致 → 规格与场景脱节。
+	curMsgs, err := s.repo.ListMessages(spec.ScenarioID)
+	if err != nil {
+		return "failed", nil
+	}
+	if spec.MessageHash != versioning.StableMessageListHash(curMsgs) {
 		return "failed", nil
 	}
 	_ = msgs

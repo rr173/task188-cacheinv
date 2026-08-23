@@ -143,6 +143,7 @@ func (s *Store) migrate() error {
 			scenario_id INTEGER NOT NULL REFERENCES scenarios(id),
 			name TEXT NOT NULL,
 			message_hash TEXT NOT NULL,
+			protocol_hash TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)`,
