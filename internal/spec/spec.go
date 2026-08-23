@@ -48,7 +48,7 @@ func (s *Service) FreezeFromScenario(scenarioID int64, name string) (*model.Spec
 		return nil, err
 	}
 	if len(msgs) == 0 {
-		return nil, fmt.Errorf("%w: scenario %d has no messages (%s)", model.ErrInvalidInput, scenarioID, msgs[0].MsgID)
+		return nil, fmt.Errorf("%w: scenario %d has no messages", model.ErrInvalidInput, scenarioID)
 	}
 	hash := versioning.StableMessageListHash(msgs)
 	spec := &model.Spec{
