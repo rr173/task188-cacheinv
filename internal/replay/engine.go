@@ -13,10 +13,18 @@ import (
 
 // Engine 是回放引擎。
 type Engine struct {
-	repo   Repo
-	ver    *versioning.Service
-	dlv    *delivery.Manager
-	now    func() time.Time
+	repo Repo
+	ver  *versioning.Service
+	dlv  *delivery.Manager
+	now  func() time.Time
+}
+
+// replicaSnapshot 记录某副本在回放快照中的状态：
+//   - exists：副本已注册；
+//   - isolated：副本被隔离，不得接收任何携带 replica_id 的消息。
+type replicaSnapshot struct {
+	exists   bool
+	isolated bool
 }
 
 // Repo 是回放引擎对存储的最小依赖。
@@ -77,10 +85,12 @@ func (e *Engine) Replay(scenarioID int64) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	replicaExists := make(map[string]bool, len(replicas))
+	// replicaState 记录每个已知副本是否被隔离；隔离副本不得接收任何
+	// 携带 replica_id 的消息（更新/失效/租约/确认/重试）。
+	replicaState := make(map[string]replicaSnapshot, len(replicas))
 	allowed := make([]model.Replica, 0, len(replicas))
 	for _, r := range replicas {
-		replicaExists[r.ID] = true
+		replicaState[r.ID] = replicaSnapshot{exists: true, isolated: r.Status == model.ReplicaIsolated}
 		if r.Status != model.ReplicaIsolated {
 			allowed = append(allowed, r)
 		}
@@ -115,7 +125,7 @@ func (e *Engine) Replay(scenarioID int64) (*Result, error) {
 		m := msgs[i]
 		seq++
 		processed++
-		res, v, err := e.step(sc, p, m, replicaExists, seen, seq)
+		res, v, err := e.step(sc, p, m, replicaState, seen, seq)
 		if err != nil {
 			return nil, err
 		}
@@ -163,7 +173,7 @@ func (e *Engine) Replay(scenarioID int64) (*Result, error) {
 
 // step 处理单条消息，返回处理结果描述；violation 非 nil 表示记录了违反步骤。
 func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Message,
-	replicaExists map[string]bool, seen map[string]model.Message, seq int64) (string, *model.Violation, error) {
+	states map[string]replicaSnapshot, seen map[string]model.Message, seq int64) (string, *model.Violation, error) {
 
 	violation := func(kind, msg string) *model.Violation {
 		return &model.Violation{
@@ -188,12 +198,28 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 	}
 	seen[m.MsgID] = m
 
+	// checkReplica 校验消息目标副本：未知 → 违反；隔离 → 拒绝并记录违反。
+	// 隔离副本不得接收任何携带 replica_id 的消息（更新/失效/租约/确认/重试）。
+	checkReplica := func(verb string) (string, *model.Violation) {
+		st, ok := states[m.ReplicaID]
+		if !ok || !st.exists {
+			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
+			msg := fmt.Sprintf("%s for unknown replica %s", verb, m.ReplicaID)
+			return "rejected:unknown_replica", violation("unknown_replica", msg)
+		}
+		if st.isolated {
+			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
+			msg := fmt.Sprintf("%s for isolated replica %s (not allowed to receive messages)",
+				verb, m.ReplicaID)
+			return "rejected:isolated_replica", violation("isolated_replica", msg)
+		}
+		return "", nil
+	}
+
 	switch m.Kind {
 	case model.MsgLease:
-		if !replicaExists[m.ReplicaID] {
-			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
-			msg := fmt.Sprintf("lease for unknown replica %s", m.ReplicaID)
-			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
+		if res, v := checkReplica("lease"); v != nil {
+			return res, v, nil
 		}
 		ttl := time.Duration(p.LeaseTTLMs) * time.Millisecond
 		e.dlv.GrantLease(m.ReplicaID, m.Key, m.Version, ttl)
@@ -201,10 +227,8 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 		return "lease_granted", nil, nil
 
 	case model.MsgInvalidate:
-		if !replicaExists[m.ReplicaID] {
-			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
-			msg := fmt.Sprintf("invalidate for unknown replica %s", m.ReplicaID)
-			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
+		if res, v := checkReplica("invalidate"); v != nil {
+			return res, v, nil
 		}
 		_, err := e.ver.InvalidateKey(m.ReplicaID, m.Key, m.Version)
 		if err != nil {
@@ -216,10 +240,8 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 		return "invalidated", nil, nil
 
 	case model.MsgUpdate:
-		if !replicaExists[m.ReplicaID] {
-			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
-			msg := fmt.Sprintf("update for unknown replica %s", m.ReplicaID)
-			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
+		if res, v := checkReplica("update"); v != nil {
+			return res, v, nil
 		}
 		_, err := e.ver.ObserveVersion(m.ReplicaID, m.Key, m.Version)
 		if err != nil {
@@ -231,10 +253,8 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 		return "observed", nil, nil
 
 	case model.MsgAck:
-		if !replicaExists[m.ReplicaID] {
-			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
-			msg := fmt.Sprintf("ack from unknown replica %s", m.ReplicaID)
-			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
+		if res, v := checkReplica("ack"); v != nil {
+			return res, v, nil
 		}
 		state, err := e.dlv.ValidateAck(m.ReplicaID, m.Key, m.Version, true)
 		if err != nil {
@@ -251,10 +271,8 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 		return "acked", nil, nil
 
 	case model.MsgRetry:
-		if !replicaExists[m.ReplicaID] {
-			_ = e.repo.UpdateMessageStatus(m.ID, model.MsgRejected)
-			msg := fmt.Sprintf("retry for unknown replica %s", m.ReplicaID)
-			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
+		if res, v := checkReplica("retry"); v != nil {
+			return res, v, nil
 		}
 		next := m.RetryCount + 1
 		dec := delivery.DecideRetry(next, p.MaxRetries)

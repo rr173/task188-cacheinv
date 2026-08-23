@@ -35,12 +35,13 @@ func ReplicaAllowed(status model.ReplicaStatus) bool {
 }
 
 // ReplicaActive 判断副本是否处于可接收消息的状态。
+// 隔离副本被暂停参与协议，不得接收任何更新/失效/租约/确认/重试消息。
 func ReplicaActive(status model.ReplicaStatus) bool {
 	switch status {
 	case model.ReplicaHealthy, model.ReplicaLagging, model.ReplicaConverged:
 		return true
 	case model.ReplicaIsolated:
-		return true
+		return false
 	default:
 		return false
 	}
