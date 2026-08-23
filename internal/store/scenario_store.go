@@ -63,11 +63,12 @@ func (s *ScenarioStore) ListScenarios() ([]model.Scenario, error) {
 	return out, rows.Err()
 }
 
-// FindScenarioByFingerprint 按指纹查场景（相同场景指纹复用结果）。
+// FindScenarioByFingerprint 按指纹查场景（仅在「同一键空间」内复用已收敛结果；
+// 跨键空间即便消息指纹相同，也视为独立场景，不复用对方结果）。
 func (s *ScenarioStore) FindScenarioByFingerprint(keyspaceID, fingerprint string) (*model.Scenario, error) {
 	row := s.db.QueryRow(
 		`SELECT id, keyspace_id, name, fingerprint, status, cursor_pos, created_at FROM scenarios
-			 WHERE fingerprint = ? ORDER BY id LIMIT 1`, fingerprint)
+			 WHERE keyspace_id = ? AND fingerprint = ? ORDER BY id LIMIT 1`, keyspaceID, fingerprint)
 	var sc model.Scenario
 	var ts string
 	if err := row.Scan(&sc.ID, &sc.KeyspaceID, &sc.Name, &sc.Fingerprint, &sc.Status, &sc.CursorPos, &ts); err != nil {

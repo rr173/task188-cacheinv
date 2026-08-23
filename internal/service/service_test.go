@@ -210,3 +210,64 @@ func TestFingerprintReuse(t *testing.T) {
 		t.Fatalf("expected fingerprint reuse for identical message set (sc2=%d)", sc2.ID)
 	}
 }
+
+func TestFingerprintNoReuseAcrossKeyspaces(t *testing.T) {
+	st, svc, _ := newTestService(t)
+	defer st.Close()
+
+	// 场景指纹由消息内容（含 ReplicaID）决定，与键空间无关。
+	// 因此两个不同键空间可以构造出「相同指纹」的场景——这正是 bug 触发条件。
+	// 此处两个键空间的场景都引用同一个副本 rpA（属于 ksA），从而产生相同指纹。
+	ksA, _ := svc.Topo.CreateKeyspace("ksA", "isolated-A", nil)
+	ksB, _ := svc.Topo.CreateKeyspace("ksB", "isolated-B", nil)
+	rpA, _ := svc.Topo.RegisterReplica(ksA.ID, "a")
+	_, _ = svc.Ver.ApplySourceUpdate(ksA.ID, "k", 1, "v1")
+
+	msgs := []model.Message{
+		{MsgID: "u", Kind: model.MsgUpdate, Key: "k", Version: 1, ReplicaID: rpA.ID},
+	}
+
+	// ksA 先创建并回放至收敛。
+	scA, _, _ := svc.CreateScenario(ksA.ID, "first-in-A", msgs)
+	_, _ = svc.AppendMessages(scA.ID, msgs)
+	resA, err := svc.RunReplay(scA.ID)
+	if err != nil {
+		t.Fatalf("replay A: %v", err)
+	}
+	if resA.Status != model.ScenarioConverged {
+		t.Fatalf("expected A converged, got %s", resA.Status)
+	}
+
+	// ksB 用「相同指纹」的消息创建场景。
+	// 跨键空间绝不应复用 ksA 的收敛结果：reused 必须为 false。
+	scB, reused, err := svc.CreateScenario(ksB.ID, "first-in-B", msgs)
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	if reused {
+		t.Fatalf("cross-keyspace fingerprint must NOT reuse: reused=true (scA=%d, scB=%d)",
+			scA.ID, scB.ID)
+	}
+	if scB.ID == scA.ID {
+		t.Fatalf("cross-keyspace scenario must be a new record, got same id %d", scA.ID)
+	}
+	if scB.KeyspaceID != ksB.ID {
+		t.Fatalf("new scenario must belong to ksB, got %s", scB.KeyspaceID)
+	}
+
+	// 独立回放：ksB 中并不存在 rpA（它属于 ksA），因此该更新应被判为未知副本
+	// 而产生违反——结论与 ksA 的 Converged 不同，证明 scB 被独立评估，
+	// 而非套用 ksA 的收敛结果。
+	_, _ = svc.AppendMessages(scB.ID, msgs)
+	resB, err := svc.RunReplay(scB.ID)
+	if err != nil {
+		t.Fatalf("replay B: %v", err)
+	}
+	if resB.Status == model.ScenarioConverged {
+		t.Fatalf("B must NOT inherit A's converged result; got converged (scA=%d, scB=%d)",
+			scA.ID, scB.ID)
+	}
+	if resB.Processed == 0 {
+		t.Fatal("expected B to actually replay (processed>0), not inherit A's result")
+	}
+}
