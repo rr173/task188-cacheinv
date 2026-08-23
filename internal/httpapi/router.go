@@ -3,11 +3,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
+	"task188-cacheinv/internal/model"
 	"task188-cacheinv/internal/service"
 )
 
@@ -89,22 +90,40 @@ func writeErr(w http.ResponseWriter, err error) {
 }
 
 // statusFor 错误 → HTTP 状态码。
+//
+// 必须基于 errors.Is 哨兵匹配而非字符串子串匹配：领域错误在向上传播时会被
+// fmt.Errorf("%w", ...) 反复包装，错误信息也会拼入业务字段（如 key、版本号）。
+// 用子串匹配会因顺序歧义把一个错误映射到错误的状态——典型地，
+// model.ErrVersionRegression 的信息 "version conflict rejected" 同时含有 "conflict"
+// 与 "rejected"，按子串它会先命中 conflict 分支而返回 200，使源版本倒退被当作成功，
+// 调用方据此继续传播旧版本。因此这里用 errors.Is 稳定区分各类哨兵错误。
 func statusFor(err error) int {
 	switch {
-	case strings.Contains(err.Error(), "not found"):
+	case errors.Is(err, model.ErrNotFound):
 		return http.StatusNotFound
-	case strings.Contains(err.Error(), "conflict"):
-		return http.StatusOK
-	case strings.Contains(err.Error(), "regression"):
+	case errors.Is(err, model.ErrVersionRegression):
+		// 源版本倒退（或副本观察版本回滚）：必须返回 409，调用方据此停止传播旧版本。
 		return http.StatusConflict
-	case strings.Contains(err.Error(), "rejected"):
+	case errors.Is(err, model.ErrConflict):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrSpecFrozen):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrScenarioNotEditable):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrScenarioNotFrozen):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrMessageContentMismatch):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrAckWithoutLease):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrUnknownReplicaAck):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrUnboundedRetry):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrReplayInProgress):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrInvalidInput):
 		return http.StatusBadRequest
-	case strings.Contains(err.Error(), "invalid"):
-		return http.StatusBadRequest
-	case strings.Contains(err.Error(), "frozen"):
-		return http.StatusConflict
-	case strings.Contains(err.Error(), "not editable"):
-		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}
