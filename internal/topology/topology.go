@@ -44,7 +44,11 @@ func (m *Manager) CreateKeyspace(name, description string, p *model.ProtocolPara
 		Description: description,
 		CreatedAt:   m.now().UTC(),
 	}
-	if p != nil {
+	// 省略协议参数时使用默认协议（默认重试次数、租约时长、收敛超时与逻辑定序），
+	// 避免空协议路径在后续校验中触发 nil 解引用崩溃。
+	if p == nil {
+		p = DefaultProtocol(id)
+	} else {
 		p.KeyspaceID = id
 		if p.Ordering == "" {
 			p.Ordering = "logical"
