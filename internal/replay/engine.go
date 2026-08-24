@@ -256,9 +256,11 @@ func (e *Engine) step(sc *model.Scenario, p *model.ProtocolParams, m model.Messa
 			msg := fmt.Sprintf("retry for unknown replica %s", m.ReplicaID)
 			return "rejected:unknown_replica", violation("unknown_replica", msg), nil
 		}
-		next := m.RetryCount + 2
+		// m.RetryCount 是此前已持久化的重试投递次数；本次重试是第 m.RetryCount+1 次。
+		next := m.RetryCount + 1
 		dec := delivery.DecideRetry(next, p.MaxRetries)
 		if !dec.Allowed {
+			// 边界耗尽：本次未投递，retry_count 保持此前已投递次数不变。
 			_ = e.repo.UpdateMessageStatusAndRetry(m.ID, model.MsgExpired, m.RetryCount)
 			msg := fmt.Sprintf("unbounded retry rejected: %s", dec.Reason)
 			return "expired:unbounded_retry", violation("unbounded_retry", msg), nil

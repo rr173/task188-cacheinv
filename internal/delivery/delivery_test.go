@@ -52,4 +52,15 @@ func TestRetryBound(t *testing.T) {
 	if d := DecideRetry(4, 3); d.Allowed {
 		t.Fatal("retry 4 of max 3 should be rejected")
 	}
+	// max=0：0 次重试被允许（边界），超过即拒绝。
+	if d := DecideRetry(0, 0); !d.Allowed {
+		t.Fatalf("retry 0 of max 0 should be allowed: %s", d.Reason)
+	}
+	if d := DecideRetry(1, 0); d.Allowed {
+		t.Fatal("retry 1 of max 0 should be rejected")
+	}
+	// 配置非法：负 max 拒绝一切重试。
+	if d := DecideRetry(0, -1); d.Allowed {
+		t.Fatal("negative max_retries should be rejected")
+	}
 }

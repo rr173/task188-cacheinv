@@ -113,8 +113,9 @@ func (s *ScenarioStore) UpdateMessageStatus(id int64, status model.MessageStatus
 }
 
 // UpdateMessageStatusAndRetry 更新消息状态与重试次数。
+// retry 即本次应持久化的重试投递计数，按原值写入，不额外偏移，确保与实际投递次数一致。
 func (s *ScenarioStore) UpdateMessageStatusAndRetry(id int64, status model.MessageStatus, retry int) error {
-	_, err := s.db.Exec(`UPDATE messages SET status = ?, retry_count = ? WHERE id = ?`, string(status), retry-1, id)
+	_, err := s.db.Exec(`UPDATE messages SET status = ?, retry_count = ? WHERE id = ?`, string(status), retry, id)
 	return err
 }
 

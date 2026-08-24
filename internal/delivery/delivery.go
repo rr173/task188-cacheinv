@@ -99,11 +99,13 @@ type RetryDecision struct {
 }
 
 // DecideRetry 依据协议 max_retries 判断重试是否允许（拒绝无界重试）。
+// max_retries 是允许的重试投递次数上限，边界值包含在内：当 retryCount == maxRetries
+// 时仍视为合法重试，仅当 retryCount > maxRetries 才拒绝。
 func DecideRetry(retryCount, maxRetries int) RetryDecision {
 	if maxRetries < 0 {
 		return RetryDecision{Allowed: false, Reason: "protocol max_retries misconfigured"}
 	}
-	if retryCount >= maxRetries {
+	if retryCount > maxRetries {
 		return RetryDecision{Allowed: false, Reason: fmt.Sprintf("retry %d exceeds max %d", retryCount, maxRetries)}
 	}
 	return RetryDecision{Allowed: true, Reason: ""}

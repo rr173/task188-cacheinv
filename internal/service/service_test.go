@@ -210,3 +210,113 @@ func TestFingerprintReuse(t *testing.T) {
 		t.Fatalf("expected fingerprint reuse for identical message set (sc2=%d)", sc2.ID)
 	}
 }
+
+// TestRetryBoundaryAllowedAndPersisted 断言协议允许的重试次数含边界值：
+// 在 max_retries=1 下，第 1 次重试（边界）必须被接受而非标记为过期，
+// 且持久化的 retry_count 必须等于真实投递次数（1），而非被偏移缩减。
+func TestRetryBoundaryAllowedAndPersisted(t *testing.T) {
+	st, svc, _ := newTestService(t)
+	defer st.Close()
+
+	ks, _ := svc.Topo.CreateKeyspace("ks", "retry", nil)
+	rp1, _ := svc.Topo.RegisterReplica(ks.ID, "a")
+	// max_retries=1：允许恰好 1 次重试投递（边界值）。
+	if _, err := svc.Topo.UpdateProtocol(&model.ProtocolParams{
+		KeyspaceID:           ks.ID,
+		MaxRetries:           1,
+		LeaseTTLMs:           5000,
+		ConvergenceTimeoutMs: 10000,
+		Ordering:             "logical",
+	}); err != nil {
+		t.Fatalf("update protocol: %v", err)
+	}
+	_, _ = svc.Ver.ApplySourceUpdate(ks.ID, "k", 1, "v1")
+
+	sc, _, _ := svc.CreateScenario(ks.ID, "retry-bound", nil)
+	_, _ = svc.AppendMessage(sc.ID, model.Message{
+		MsgID: "r1", Kind: model.MsgRetry, Key: "k", Version: 1, ReplicaID: rp1.ID,
+	})
+	res, err := svc.RunReplay(sc.ID)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if res.Status == model.ScenarioMonotonicityViolated {
+		t.Fatalf("boundary retry must be allowed, got violation: %v", res.Violations)
+	}
+	// 持久化的 retry_count 必须等于真实投递次数 1（边界耗尽但允许）。
+	msgs, err := svc.ListMessages(sc.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	var got *model.Message
+	for i := range msgs {
+		if msgs[i].MsgID == "r1" {
+			got = &msgs[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("retry message not found")
+	}
+	if got.Status != model.MsgDelivered {
+		t.Fatalf("expected delivered boundary retry, got %s", got.Status)
+	}
+	if got.RetryCount != 1 {
+		t.Fatalf("persisted retry_count must equal delivery count 1, got %d", got.RetryCount)
+	}
+}
+
+// TestRetryBeyondBoundaryExpired 断言超过协议上限的重试被标记为过期，
+// 且持久化的 retry_count 保持此前已投递次数（本次未投递）而不被放大或缩减。
+// 单条重试消息携带 RetryCount=1（已有一次投递），在 max_retries=1 下第 2 次超限。
+func TestRetryBeyondBoundaryExpired(t *testing.T) {
+	st, svc, _ := newTestService(t)
+	defer st.Close()
+
+	ks, _ := svc.Topo.CreateKeyspace("ks", "retry-exp", nil)
+	rp1, _ := svc.Topo.RegisterReplica(ks.ID, "a")
+	// max_retries=1：第 1 次重试允许，第 2 次即超限。
+	if _, err := svc.Topo.UpdateProtocol(&model.ProtocolParams{
+		KeyspaceID:           ks.ID,
+		MaxRetries:           1,
+		LeaseTTLMs:           5000,
+		ConvergenceTimeoutMs: 10000,
+		Ordering:             "logical",
+	}); err != nil {
+		t.Fatalf("update protocol: %v", err)
+	}
+	_, _ = svc.Ver.ApplySourceUpdate(ks.ID, "k", 1, "v1")
+
+	sc, _, _ := svc.CreateScenario(ks.ID, "retry-exp", nil)
+	// 该重试消息声明已投递 1 次（RetryCount=1）；本次为第 2 次，超过 max_retries=1。
+	_, _ = svc.AppendMessage(sc.ID, model.Message{
+		MsgID: "r1", Kind: model.MsgRetry, Key: "k", Version: 1, ReplicaID: rp1.ID,
+		RetryCount: 1,
+	})
+	res, err := svc.RunReplay(sc.ID)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if res.Status != model.ScenarioMonotonicityViolated {
+		t.Fatalf("expected violation for over-bound retry, got %s", res.Status)
+	}
+	msgs, err := svc.ListMessages(sc.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	var got *model.Message
+	for i := range msgs {
+		if msgs[i].MsgID == "r1" {
+			got = &msgs[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("retry message not found")
+	}
+	if got.Status != model.MsgExpired {
+		t.Fatalf("expected expired over-bound retry, got %s", got.Status)
+	}
+	// 本次未投递：retry_count 必须保持此前已投递次数 1，既不被放大为 2 也不被偏移缩减。
+	if got.RetryCount != 1 {
+		t.Fatalf("persisted retry_count must stay at delivered count 1 (not delivered), got %d", got.RetryCount)
+	}
+}
