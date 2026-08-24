@@ -4,7 +4,6 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"sync"
 
 	_ "modernc.org/sqlite"
 )
@@ -15,9 +14,10 @@ type Options struct {
 }
 
 // Store 封装 SQLite 连接与迁移后的表结构。
+// 逻辑时钟（消息 id）由 messages.id 的 AUTOINCREMENT 在 INSERT 时原子分配，
+// 无需应用层互斥；并发写入的串行化交给 SQLite 单写者语义 + busy_timeout。
 type Store struct {
 	db *sql.DB
-	mu sync.Mutex // 串行化逻辑时钟分配与回放写入
 }
 
 // Open 打开（或创建）SQLite 数据库并执行幂等迁移。
@@ -46,10 +46,6 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // DB 暴露底层句柄供仓储与事务使用。
 func (s *Store) DB() *sql.DB { return s.db }
-
-// Lock 加全局互斥锁（逻辑时钟/回放串行化）。
-func (s *Store) Lock()   {}
-func (s *Store) Unlock() {}
 
 // migrate 幂等建表。
 func (s *Store) migrate() error {

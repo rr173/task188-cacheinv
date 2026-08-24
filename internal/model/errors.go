@@ -16,6 +16,10 @@ var (
 	// ErrMessageContentMismatch 表示同一消息 ID 携带不同内容（幂等键冲突）。
 	ErrMessageContentMismatch = errors.New("message id reused with different content")
 
+	// ErrDuplicateMessage 表示同 (scenario_id, msg_id) 的消息已存在（幂等重试）。
+	// 与 ErrMessageContentMismatch 区分：内容一致的真重复，而非内容冲突。
+	ErrDuplicateMessage = errors.New("duplicate message")
+
 	// ErrAckWithoutLease 表示副本在未持有租约的情况下确认版本。
 	ErrAckWithoutLease = errors.New("ack without lease rejected")
 
@@ -52,6 +56,8 @@ func ErrorKind(err error) string {
 		return "version_regression"
 	case errors.Is(err, ErrMessageContentMismatch):
 		return "message_content_mismatch"
+	case errors.Is(err, ErrDuplicateMessage):
+		return "duplicate"
 	case errors.Is(err, ErrAckWithoutLease):
 		return "ack_without_lease"
 	case errors.Is(err, ErrUnknownReplicaAck):

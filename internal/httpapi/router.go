@@ -93,6 +93,8 @@ func statusFor(err error) int {
 	switch {
 	case strings.Contains(err.Error(), "not found"):
 		return http.StatusNotFound
+	case strings.Contains(err.Error(), "duplicate"):
+		return http.StatusConflict
 	case strings.Contains(err.Error(), "conflict"):
 		return http.StatusConflict
 	case strings.Contains(err.Error(), "regression"):

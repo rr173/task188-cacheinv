@@ -32,8 +32,9 @@ func (s *Service) CreateScenario(keyspaceID, name string, msgs []model.Message) 
 	return sc, reused, nil
 }
 
-// AppendMessage 追加一条消息：分配逻辑时钟序号并落库。
-// 场景必须处于 editing 态；并行追加由 store 级互斥串行化。
+// AppendMessage 追加一条消息：逻辑时钟（id）由 SQLite AUTOINCREMENT 原子分配，
+// 消除并发追加时的 MAX+1 竞态。每条成功追加都获得唯一的逻辑时钟与记录；
+// 同 (scenario_id, msg_id) 幂等重试由 store 透传 ErrDuplicateMessage，不再静默丢弃。
 func (s *Service) AppendMessage(scenarioID int64, msg model.Message) (*model.Message, error) {
 	sc, err := s.scs.GetScenario(scenarioID)
 	if err != nil {
@@ -42,12 +43,6 @@ func (s *Service) AppendMessage(scenarioID int64, msg model.Message) (*model.Mes
 	if sc.Status != model.ScenarioEditing {
 		return nil, fmt.Errorf("%w: scenario %d is %s", model.ErrScenarioNotEditable, scenarioID, sc.Status)
 	}
-	// 同场景内 msg_id 唯一；冲突判定交给唯一约束与调用方预检。
-	id, err := s.scs.NextMessageID()
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = id
 	msg.ScenarioID = scenarioID
 	msg.Status = model.MsgPending
 	msg.ContentHash = versioning.ContentHash(msg.Kind, msg.Key, msg.Version, msg.ReplicaID)

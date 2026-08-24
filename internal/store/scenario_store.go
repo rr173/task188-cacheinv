@@ -95,15 +95,31 @@ func (s *ScenarioStore) ScenarioCount() (int, error) {
 	return n, nil
 }
 
-// InsertMessage 追加一条消息（逻辑时钟由调用方分配 id）。
+// InsertMessage 追加一条消息：逻辑时钟（id）由 SQLite AUTOINCREMENT 唯一分配，
+// 消除并发追加时应用层 MAX(id)+1 的竞态。保留 INSERT OR IGNORE 服务
+// (scenario_id, msg_id) 的幂等去重：命中已存在消息时返回 model.ErrDuplicateMessage，
+// 让上层把“真重复”与“成功追加”区分开，而不再静默丢弃。
 func (s *ScenarioStore) InsertMessage(m *model.Message) error {
-	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO messages (id, scenario_id, msg_id, kind, key, version, replica_id, content_hash, status, retry_count, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ID, m.ScenarioID, m.MsgID, string(m.Kind), m.Key, m.Version, m.ReplicaID,
+	res, err := s.db.Exec(
+		`INSERT OR IGNORE INTO messages (scenario_id, msg_id, kind, key, version, replica_id, content_hash, status, retry_count, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ScenarioID, m.MsgID, string(m.Kind), m.Key, m.Version, m.ReplicaID,
 		m.ContentHash, string(m.Status), m.RetryCount, m.CreatedAt.Format(time.RFC3339Nano),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// 命中 UNIQUE(scenario_id, msg_id)：幂等重试，不应被当成成功追加。
+		return model.ErrDuplicateMessage
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	m.ID = id
+	return nil
 }
 
 // UpdateMessageStatus 更新消息状态。
@@ -141,14 +157,8 @@ func (s *ScenarioStore) ListMessages(scenarioID int64) ([]model.Message, error) 
 	return out, rows.Err()
 }
 
-// NextMessageID 分配下一个逻辑时钟序号（场景内串行调用）。
-func (s *ScenarioStore) NextMessageID() (int64, error) {
-	var max sql.NullInt64
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM messages`).Scan(&max); err != nil {
-		return 0, err
-	}
-	return max.Int64 + 1, nil
-}
+// NextMessageID removed: 逻辑时钟改由 INSERT 时 SQLite AUTOINCREMENT 原子分配，
+// 避免并发追加时 MAX(id)+1 的读-改-写竞态导致 id 冲突与消息丢失。
 
 // AppendReplayEvent 记录回放轨迹一步。
 func (s *ScenarioStore) AppendReplayEvent(e *model.ReplayEvent) error {
